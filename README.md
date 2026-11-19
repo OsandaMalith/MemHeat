@@ -6,7 +6,7 @@ MemHeat maps the memory of a running process, or the contents of a PE file on di
 entropy heatmap. It then flags what doesn't belong: injected shellcode, manually mapped
 DLLs, packed code, writable-and-executable memory, and payloads hidden inside executables.
 
-One 162 KB executable. No installer, no runtime, no dependencies.
+One 164 KB executable. No installer, no runtime, no dependencies.
 
 ![Memory scan](screenshots/memory-scan.png)
 
@@ -67,11 +67,11 @@ the tricks position-independent code needs to work:
 | `MSF/CS-stub` | The `cld; call` / `cld; and rsp,-16; call` prologue of Metasploit and Cobalt Strike payloads |
 | `FPU-GetPC` | `fnstenv [esp-0Ch]` (shikata_ga_nai-style encoders) |
 | `call/pop-GetPC` | `call $+5; pop reg`: finding its own address |
-| `direct-syscall-stub` | `mov r10, rcx; mov eax, N`: syscalls made outside ntdll to dodge EDR hooks |
+| `direct-syscall-stub` | `mov r10, rcx; mov eax, N; syscall`: syscalls made outside ntdll to dodge EDR hooks |
 
 A region is flagged when it has one strong indicator (the first four), or two different weak
-ones. Mapped views always need two different indicators, because they often hold genuine
-precompiled code. Shellcode cells are drawn in **amber**. Double-clicking a `[SHC!]`
+ones. Mapped views need two different indicators **within 1 KB of each other**: shellcode is
+compact, while genuine compiled code has these instructions spread far apart. Shellcode cells are drawn in **amber**. Double-clicking a `[SHC!]`
 finding opens the hex view right at the first hit, with the indicators listed in the verdict.
 
 ### File mode: dissect a PE on disk
@@ -93,9 +93,30 @@ Open a file with **Open file...**, drag and drop it onto the window, or run
 | `high-entropy overlay` | Encrypted or compressed data appended to the executable |
 | `EMBEDDED PE at 0x…` | A complete second executable hidden inside this one (dropper pattern) |
 | `data appended AFTER the Authenticode signature` | Data hidden in a signed file without breaking its signature |
+| `XOR-ENCRYPTED PE at 0x…  key[n] = …` | A whole executable hidden with repeating-key XOR. The key is recovered for you |
+| `SHELLCODE?  PEB-walk …` | Plaintext shellcode stored in the file: a payload byte array in `.data`, a resource, the overlay, or a code cave in `.text` |
 
 Signed Windows binaries are handled correctly: their signature block is identified and
 **not** reported as a suspicious high-entropy overlay.
+
+**XOR-encrypted payload hunter.** A common loader pattern is to XOR-encrypt a PE, embed it,
+and decrypt it in memory at runtime. Single-byte XOR doesn't change entropy at all and a short
+repeating key barely raises it, so entropy checks miss it. MemHeat finds it without knowing
+the key. XOR-ing the data with itself shifted by the key length cancels the key out:
+
+```
+c[i] ^ c[i+L]  =  p[i] ^ p[i+L]
+```
+
+Every Microsoft-linked PE contains the same DOS stub text (`This program cannot be run in DOS
+mode.`). MemHeat looks for that pattern for every key length from 1 to 32 bytes, recovers the
+key, and confirms it by decrypting the `MZ` and `PE` headers. Double-click the finding to see
+the payload **decrypted** in the hex view.
+
+**Static shellcode scan.** The same shellcode patterns as memory mode are searched across every
+section, the overlay, and raw (non-PE) files. In code sections and in compressed-looking data,
+two different indicators within 1 KB are required. Hits are drawn in amber, and double-click
+jumps to the bytes.
 
 ![File mode](screenshots/file-mode.png)
 
@@ -104,6 +125,7 @@ Double-click any cell or finding to see the first 1 KB as hex and ASCII, read li
 the process or from disk. The window opens with a verdict line, for example:
 
 - `SHELLCODE INDICATORS: PEB-walk  MSF/CS-stub  ROR13-hashing`
+- `XOR-ENCRYPTED PE: shown DECRYPTED with key[4] = DEADBEEF`
 - `PE HEADER IN NON-IMAGE MEMORY: manually mapped / reflectively loaded module?`
 - `EMBEDDED PE FILE inside this file: dropper / packed payload?`
 - `MZ signature without a valid PE header: damaged or deliberately wiped header?`
@@ -119,7 +141,8 @@ For embedded executables, it jumps straight to the embedded `MZ` header.
 ## Use cases
 
 - **Malware triage.** Open a suspicious binary and see in seconds whether it's packed, has
-  a payload appended, or carries a second executable inside.
+  a payload appended, carries a second executable inside (plain or XOR-encrypted, key recovered),
+  or holds plaintext shellcode.
 - **Incident response.** Scan a running process for injected shellcode (with the hit located for you), RWX regions and
   manually mapped DLLs that won't appear in any module list.
 - **Watching unpackers.** Turn on live mode and watch high-entropy regions turn into
@@ -171,7 +194,12 @@ For embedded executables, it jumps straight to the embedded `MZ` header.
   opened, even as Administrator.
 - The memory heatmap has 64 KB cells, so small regions are summarized at that size.
   Use the hex view for detail.
-- File mode handles files up to 1 GB.
+- File mode handles files up to 1 GB. The XOR hunt runs on sections and overlays up to 16 MB each.
+- The XOR hunter needs a repeating-key XOR and the standard DOS stub text. RC4/AES, rolling or
+  custom XOR schemes, and payloads with the DOS stub stripped are not found this way. The decrypted
+  PE still shows up in memory mode (`[PE!]` / `[XPRV]`) once the loader runs.
+- Shellcode detection is pattern-based, so encrypted or encoded shellcode is only seen after it
+  decodes itself in memory. Use memory mode with live mode for that.
 
 ---
 
@@ -185,7 +213,7 @@ into, or modifies other processes or files.
 Verify your download:
 
 ```
-SHA-256  93B3BF9094AB2052537C3C6D5C0CDBC57F324A200FF449814542B0CE16121C26  MemHeat.exe
+SHA-256  4DAAD965845DB9B02A6D3C969D571A7D06B89C339EC0564133001E880CB3B5B1  MemHeat.exe
 ```
 
 ---
